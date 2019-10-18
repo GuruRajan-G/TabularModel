@@ -1,0 +1,690 @@
+USE [ERDB]
+GO
+
+IF EXISTS( SELECT TOP 1 1  FROM [ERDB].SYS.objects WHERE name='PartitionManagerStatus')
+BEGIN
+DROP TABLE [Catalog].[PartitionManagerStatus]
+PRINT '>>> TABLE [Catalog].[PartitionManagerStatus] DROPPED.'
+END
+GO
+
+/****** Object:  Table [Catalog].[PartitionManager]    Script Date: 10/8/2019 8:03:34 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [Catalog].[PartitionManagerStatus](
+    [PackageName] [varchar](max) NULL,
+	[PartitionName] [varchar](max) NULL,
+	[InsertedRows] [bigint] NULL,
+	[UpdatedRows] [bigint] NULL,
+	[ProcessAddPartionQuery] [varchar](max) NULL,
+	[ProcessDataPartionQuery] [varchar](max) NULL,
+	[T_Begin_TS] [datetime] NULL,
+	[T_End_TS] [datetime] NULL,
+	[T_Status] [varchar](15) NULL,
+	[Load_Ver_ID] [bigint] NULL
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+
+GO
+
+PRINT '>>> TABLE [Catalog].[PartitionManagerStatus] CREATED.'
+
+GO
+
+
+IF EXISTS( SELECT TOP 1 1  FROM [ERDB].SYS.objects WHERE name='usp_Partition_Manager')
+BEGIN
+DROP PROCEDURE [Catalog].[usp_Partition_Manager] 
+PRINT '>>> PROCEDURE [ERDB].[Catalog].[usp_Partition_Manager] DROPPED.'
+END
+GO
+/****** Object:  StoredProcedure [Catalog].[usp_Partition_Manager]    Script Date: 9/25/2019 9:07:45 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/**********************************************************************************************************************************
+** Name: [usp_Partition_Manager]
+** Desc: Sp to CREATE dynamic source view from dimbusineess rules for the fact table
+EXEC [Catalog].[usp_Partition_Manager] 0 ,'ProcessCubes','DimMember_History','DimensionKey','LAST_MODIFIED_DTM','INT'
+EXEC [Catalog].[usp_Partition_Manager] 0 ,'ProcessCubes','DimMember_History','DimensionKey','LAST_MODIFIED_DTM','DATETIME'
+**********************************************************************************************************************************/
+CREATE PROCEDURE [Catalog].[usp_Partition_Manager] 
+@LoadVersionID nvarchar(30) =NULL,
+@Packagename nvarchar(30),
+@Tablename nvarchar(30),
+@Keyname nvarchar(30),
+@BusinessColumn nvarchar(30),
+@BusinessColumnType nvarchar(30)
+
+AS
+BEGIN 
+
+DECLARE @TCD VARCHAR(MAX)='Partition_Manager'
+DECLARE @TaskDuration DATETIME= GETDATE()
+DECLARE @LastExecutionDate Datetime=(SELECT TOP 1 ISNULL(MAX(T_Last_Execution_DTM),'1990-01-01') AS [T_Last_Execution_DTM] 
+                                     FROM [Catalog].[Task] WITH(NOLOCK) WHERE T_Cd= @Packagename AND T_Status='COMPLETED'
+                                     ORDER BY [T_Last_Execution_DTM] DESC)
+DECLARE @Partition_Query VARCHAR(MAX)=''	
+DECLARE @BASICQUERY VARCHAR(MAX)=(SELECT TOP 1 ProcessDataPartionQuery FROM [Catalog].[SSASPartitionManager] WITH(NOLOCK) WHERE PartitionID= @Tablename AND RequiresProcessFlag=0)
+
+                                                              --CONVERT(varchar(50),@LastExecutionDate,121)
+
+
+--SELECT '''+ @Tablename+'''+''-''+CONVERT(nvarchar(MAX),DAT.DateKey) as PartitionName,YEAR,MONTH,COUNT('+@Keyname+') AS TotalRecords,NULL AS Status,'+@LoadVersionID+' AS Load_Ver_ID  
+
+IF(@BusinessColumnType='DATETIME')
+
+BEGIN
+
+
+SET @Partition_Query=
+'INSERT INTO [Catalog].[PartitionManagerStatus](PartitionName,InsertedRows,Load_Ver_ID,ProcessAddPartionQuery,PackageName)
+SELECT '''+ @Tablename+'''+''_''+CAST(YEAR AS nvarchar(5))+''_''+CAST(MONTH AS nvarchar(3)) as PartitionName,
+COUNT('+@Keyname+') AS TotalRecords,'+@LoadVersionID+' AS Load_Ver_ID ,
+'''+ @BASICQUERY+'''+'' DIMENSION WITH(NOLOCK) WHERE  DIMENSION.UPDATED_DATETIME> '''''+CONVERT(varchar(50),@LastExecutionDate,121)+''''' AND  CAST(DIMENSION.'+@BusinessColumn+' AS DATE) >=''''''+CAST(DAT.FirstDateofMonth AS nvarchar(MAX))+'''''' AND CAST(DIMENSION.'+@BusinessColumn+' AS DATE)<=''''''+CAST(DAT.LastDateofMonth AS nvarchar(MAX))+''''''''
+AS Partition_Query,'''+@Packagename+''' as PackageName FROM Catalog.'+@Tablename+' DIMENSION WITH(NOLOCK)
+INNER JOIN CATALOG.DIMDATE DAT ON  DAT.DATE=CAST(DIMENSION.'+@BusinessColumn+' AS DATE )
+WHERE DIMENSION.UPDATED_DATETIME> '''+CONVERT(varchar(50),@LastExecutionDate,121)+'''
+GROUP BY DAT.YEAR,DAT.MONTH,DAT.FIRSTDATEOFMONTH,DAT.LASTDATEOFMONTH
+ORDER BY DAT.YEAR,DAT.MONTH,DAT.FIRSTDATEOFMONTH,DAT.LASTDATEOFMONTH ASC
+
+;WITH TEMPTABLE(PartitionName,UpdatedRows,Load_Ver_ID,ProcessDataPartionQuery,PackageName)
+AS
+(SELECT '''+ @Tablename+'''+''_''+CAST(YEAR AS nvarchar(5))+''_''+CAST(MONTH AS nvarchar(3)) as PartitionName,
+COUNT('+@Keyname+') AS TotalRecords,'+@LoadVersionID+' AS Load_Ver_ID ,
+'''+ @BASICQUERY+'''+'' DIMENSION WITH(NOLOCK) WHERE CAST(DIMENSION.'+@BusinessColumn+' AS DATE) >=''''''+CAST(DAT.FirstDateofMonth AS nvarchar(MAX))+'''''' AND CAST(DIMENSION.'+@BusinessColumn+' AS DATE)<=''''''+CAST(DAT.LastDateofMonth AS nvarchar(MAX))+''''''''
+AS Partition_Query,'''+@Packagename+''' as PackageName FROM Catalog.'+@Tablename+' DIMENSION WITH(NOLOCK)
+INNER JOIN CATALOG.DIMDATE DAT ON  DAT.DATE=CAST(DIMENSION.'+@BusinessColumn+' AS DATE )
+WHERE DIMENSION.UPDATED_DATETIME> '''+CONVERT(varchar(50),@LastExecutionDate,121)+'''
+AND DIMENSION.CREATED_DATETIME!=DIMENSION.UPDATED_DATETIME
+GROUP BY DAT.YEAR,DAT.MONTH,DAT.FIRSTDATEOFMONTH,DAT.LASTDATEOFMONTH)
+
+UPDATE T1
+SET T1.ProcessDataPartionQuery=T2.ProcessDataPartionQuery,T1.UpdatedRows=T2.UpdatedRows
+FROM [Catalog].[PartitionManagerStatus] AS T1
+INNER JOIN TEMPTABLE T2 ON T2.Load_Ver_ID=T1.Load_Ver_ID AND T2.PartitionName=T1.PartitionName'
+
+
+--PRINT(@Partition_Query)
+EXEC(@Partition_Query)
+
+END
+
+ELSE IF (@BusinessColumnType='INTEGER')
+
+BEGIN
+
+SET @Partition_Query=
+'INSERT INTO [Catalog].[PartitionManagerStatus](PartitionName,TotalRows,Load_Ver_ID,PartionQuery,PackageName)
+SELECT '''+ @Tablename+'''+''_''+CAST(YEAR AS nvarchar(5))+''_''+CAST(MONTH AS nvarchar(3)) as PartitionName,
+COUNT('+@Keyname+') AS TotalRecords,'+@LoadVersionID+' AS Load_Ver_ID ,
+'''+ @BASICQUERY+'''+'' DIMENSION WITH(NOLOCK) WHERE DIMENSION.UPDATED_DATETIME> '''''+CONVERT(varchar(50),@LastExecutionDate,121)+''''' AND CAST(DIMENSION.'+@BusinessColumn+' AS DATE) >=''''''+CAST(DAT.FirstDateofMonth AS nvarchar(MAX))+'''''' AND CAST(DIMENSION.'+@BusinessColumn+' AS DATE)<=''''''+CAST(DAT.LastDateofMonth AS nvarchar(MAX))+''''''''
+AS Partition_Query,'''+@Packagename+''' as PackageName FROM Catalog.'+@Tablename+' DIMENSION WITH(NOLOCK)
+INNER JOIN CATALOG.DIMDATE DAT ON  DAT.DateKey=DIMENSION.'+@BusinessColumn+'
+WHERE DIMENSION.UPDATED_DATETIME> '''+CONVERT(varchar(50),@LastExecutionDate,121)+'''
+GROUP BY DAT.YEAR,DAT.MONTH,DAT.FIRSTDATEOFMONTH,DAT.LASTDATEOFMONTH
+ORDER BY DAT.YEAR,DAT.MONTH,DAT.FIRSTDATEOFMONTH,DAT.LASTDATEOFMONTH ASC
+
+;WITH TEMPTABLE(PartitionName,UpdatedRows,Load_Ver_ID,ProcessDataPartionQuery,PackageName)
+AS
+(SELECT '''+ @Tablename+'''+''_''+CAST(YEAR AS nvarchar(5))+''_''+CAST(MONTH AS nvarchar(3)) as PartitionName,
+COUNT('+@Keyname+') AS TotalRecords,'+@LoadVersionID+' AS Load_Ver_ID ,
+'''+ @BASICQUERY+'''+'' DIMENSION WITH(NOLOCK) WHERE CAST(DIMENSION.'+@BusinessColumn+' AS DATE) >=''''''+CAST(DAT.FirstDateofMonth AS nvarchar(MAX))+'''''' AND CAST(DIMENSION.'+@BusinessColumn+' AS DATE)<=''''''+CAST(DAT.LastDateofMonth AS nvarchar(MAX))+''''''''
+AS Partition_Query,'''+@Packagename+''' as PackageName FROM Catalog.'+@Tablename+' DIMENSION WITH(NOLOCK)
+INNER JOIN CATALOG.DIMDATE DAT ON  DAT.DATE=CAST(DIMENSION.'+@BusinessColumn+' AS DATE )
+WHERE DIMENSION.UPDATED_DATETIME> '''+CONVERT(varchar(50),@LastExecutionDate,121)+'''
+AND DIMENSION.CREATED_DATETIME!=DIMENSION.UPDATED_DATETIME
+GROUP BY DAT.YEAR,DAT.MONTH,DAT.FIRSTDATEOFMONTH,DAT.LASTDATEOFMONTH)
+
+UPDATE T1
+SET T1.ProcessDataPartionQuery=T2.ProcessDataPartionQuery,T1.UpdatedRows=T2.UpdatedRows,T1.ProcessAddPartionQuery=NULL
+FROM [Catalog].[PartitionManagerStatus] AS T1
+INNER JOIN TEMPTABLE T2 ON T2.Load_Ver_ID=T1.Load_Ver_ID AND T2.PartitionName=T1.PartitionName'
+
+
+--PRINT(@Partition_Query)
+EXEC(@Partition_Query)
+
+END
+
+INSERT INTO [Catalog].[Logs]
+               (T_CD, 
+                           L_TASK,
+                           L_EVENT,
+                           L_HOST_MACHINE,
+                           L_TASK_DURATION,
+                           L_SUBTASK_DURATION,
+                           L_Info,
+                           Cr_TS,
+                           Load_Ver_ID) 
+           VALUES (@Tablename+'_Partition', 
+                           'usp_' +@TCD,
+                           'Information',
+                           @@Servername,
+                           DATEDIFF(second,@TaskDuration,GetDate()),
+                           0,
+                           @Partition_Query--+' Last Completed Execution Max Date - '+CONVERT(varchar(50),@LastExecutionDate,121),
+                          ,GETDATE()
+                          ,@LoadVersionID)
+
+
+SELECT PartitionName,ISNULL(InsertedRows,0) AS InsertedRows ,ISNULL(UpdatedRows,0) AS UpdatedRows ,ISNULL(ProcessAddPartionQuery,'') AS ProcessAddPartionQuery,ISNULL(ProcessDataPartionQuery,'') AS ProcessDataPartionQuery FROM Catalog.[PartitionManagerStatus]  
+WITH(NOLOCK) WHERE LOAD_VER_ID=@LoadVersionID
+
+END
+
+GO
+
+PRINT '>>> PROCEDURE [Catalog].[usp_Partition_Manager] CREATED.'
+
+GO
+
+IF EXISTS( SELECT TOP 1 1  FROM [ERDB].SYS.objects WHERE name='SSASPartitionManager')
+BEGIN
+DROP TABLE [Catalog].[SSASPartitionManager] 
+PRINT '>>> TABLE [ERDB].[Catalog].[SSASPartitionManager] DROPPED.'
+END
+GO
+CREATE TABLE [Catalog].[SSASPartitionManager](
+	[DatabaseID] [varchar](50) NOT NULL,
+	[CubeID] [varchar](100) NOT NULL,
+	[MeasureGroupID] [varchar](100) NOT NULL,
+	[PartitionID] [varchar](100) NOT NULL,
+	[PartitionName] [varchar](100) NULL,
+	[PartitionSourceType] [varchar](500) NULL,
+	[DataSourceID] [varchar](500) NULL,
+	[ProcessAddPartionQuery] [varchar](max) NULL,
+	[ProcessDataPartionQuery] [varchar](max) NULL,
+	[StorageMode] [varchar](20) NULL,
+	[ProcessType] [varchar](20) NULL,
+	[AggregationDesignID] [varchar](100) NULL,
+	[InsertEstimatedRows] [bigint] NULL,
+	[UpdateEstimatedRows] [bigint] NULL,
+	[RequiresProcessFlag] [smallint] NULL,
+	[CreatedDateTime] [datetime] NULL,
+	[LastProcessedDateTime] [datetime] NULL,
+	[Load_Ver_ID] [bigint] NULL,
+	 CONSTRAINT [PK_SSASPartitionManager] PRIMARY KEY CLUSTERED 
+	(
+		[DatabaseID] ASC,
+		[CubeID] ASC,
+		[MeasureGroupID] ASC,
+		[PartitionID] ASC
+	)
+)
+
+GO
+
+PRINT '>>> TABLE [Catalog].[SSASPartitionManager] CREATED.'
+
+GO
+
+PRINT '>>> TABLE [Catalog].[SSASPartitionManager] Record Insertion Started'
+
+INSERT [Catalog].[SSASPartitionManager] ([DatabaseID], [CubeID], [MeasureGroupID], [PartitionID],[PartitionName],[PartitionSourceType],[DataSourceID],[ProcessDataPartionQuery],[ProcessAddPartionQuery],[StorageMode],[ProcessType],[AggregationDesignID],[InsertEstimatedRows],[UpdateEstimatedRows],[RequiresProcessFlag],[CreatedDateTime],[LastProcessedDateTime]) 
+VALUES ('ISurogateMemberCatalog','Model','DimMember_History_18f06d70-93fd-4fe3-8d65-3c22389d8b9a','DimMember_History','DimMember_History','QueryBinding','c9e794fe-08f9-4ea9-a119-ff1c199c31b4','SELECT * FROM [Catalog].[DimMember_History]','SELECT * FROM [Catalog].[DimMember_History]','InMemory','ProcessData',NULL,NULL,NULL,'0',NULL,NULL)
+
+PRINT '>>> TABLE [Catalog].[SSASPartitionManager] Record Insertion Completed'
+
+GO
+
+IF EXISTS( SELECT TOP 1 1  FROM [ERDB].SYS.objects WHERE name='usp_getPartitionCommand')
+BEGIN
+DROP PROCEDURE [Catalog].[usp_getPartitionCommand] 
+PRINT '>>> PROCEDURE [ERDB].[Catalog].[usp_getPartitionCommand] DROPPED.'
+END
+GO
+/****** Object:  StoredProcedure [Catalog].[usp_getPartitionCommand]    Script Date: 9/25/2019 9:07:45 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/**********************************************************************************************************************************
+** Name: [usp_getPartitionCommand]
+DECLARE @ExitCode varchar(max) 
+EXEC [Catalog].[usp_getPartitionCommand] 0,'DimMember_History_18f06d70-93fd-4fe3-8d65-3c22389d8b9a','DimMember_History','SEELCT * FORM','500',@ExitCode OUT
+SELECT @ExitCode
+**********************************************************************************************************************************/
+
+CREATE PROCEDURE [Catalog].[usp_getPartitionCommand]
+@LoadVersionID nvarchar(30) =NULL
+,@MeasureGroupID as varchar(500)
+,@PartitionName as varchar(500)
+,@ProcessAddPartionQuery as varchar(max) NULL
+,@ProcessDataPartionQuery as varchar(max) NULL
+,@InsertedRows as BIGINT
+,@updatedRows as BIGINT
+,@PartitionCommand as varchar(max) output
+as
+begin
+
+DECLARE @TCD VARCHAR(MAX)='getPartitionCommand'
+DECLARE @TaskDuration DATETIME= GETDATE()
+
+IF NOT EXISTS(SELECT TOP 1 1 FROM [Catalog].[SSASPartitionManager] WITH(NOLOCK) WHERE [PartitionName]=@PartitionName)
+BEGIN
+INSERT [Catalog].[SSASPartitionManager] ([DatabaseID], [CubeID], [MeasureGroupID], [PartitionID],[PartitionName],[PartitionSourceType],[DataSourceID],[ProcessAddPartionQuery],[ProcessDataPartionQuery],[StorageMode],[ProcessType],[AggregationDesignID],InsertEstimatedRows,UpdateEstimatedRows,[RequiresProcessFlag],[CreatedDateTime],[LastProcessedDateTime],[Load_Ver_ID]) 
+SELECT TOP 1
+[DatabaseID]
+,[CubeID]
+,@MeasureGroupID
+,@PartitionName
+,@PartitionName
+,[PartitionSourceType]
+,[DataSourceID]
+,@ProcessAddPartionQuery
+,@ProcessDataPartionQuery
+,[StorageMode]
+,[ProcessType]
+,[AggregationDesignID]
+,@InsertedRows
+,@updatedRows
+,'1'
+,NULL
+,NULL
+,@LoadVersionID
+FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK)
+WHERE [MeasureGroupID]=@MeasureGroupID
+
+END
+
+
+DECLARE @DatabaseID as varchar(50) = (SELECT TOP 1 [DatabaseID] FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName)
+DECLARE  @CubeID as varchar(100)= (SELECT TOP 1 [CubeID] FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName)
+DECLARE  @PartitionID as varchar(500) = (SELECT TOP 1 [PartitionID] FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName)
+--DECLARE @ProcessFlag as BIGINT=   @updatedRows--(SELECT UpdatedRows FROM Catalog.PartitionManagerStatus WITH(NOLOCK) WHERE Load_Ver_ID=@LoadVersionID AND PartitionName=@PartitionName)
+DECLARE  @EstimateRow as varchar(500) = (SELECT SUM(@updatedRows+@InsertedRows))--(SELECT TOP 1 SUM(UpdateEstimatedRows+InsertEstimatedRows) as EstimateRow FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName)
+
+declare @ParentObjectXmla as varchar(max),@PartitionXmla  as varchar(max)
+
+		select @ParentObjectXmla =
+		(
+		select @DatabaseID as DatabaseID, @CubeID as CubeID, @MeasureGroupID as MeasureGroupID ,@PartitionID AS PartitionID
+		for xml path ('Object')
+		);
+IF(@updatedRows!=0)   --- i.e we have updaterecord count in PartitionManagerStatus for respective Partition.
+							   ---if we have atleast one updatedrecord count then no need to consider insertcount
+BEGIN
+
+;with xmlnamespaces('http://www.w3.org/2001/XMLSchema' as xsd 
+							 ,'http://www.w3.org/2001/XMLSchema-instance' as xsi
+							 ,'http://schemas.microsoft.com/analysisservices/2003/engine/2' as ddl2
+							 ,'http://schemas.microsoft.com/analysisservices/2003/engine/2/2' as ddl2_2
+							 ,'http://schemas.microsoft.com/analysisservices/2008/engine/100/100' as ddl100_100
+							 ,'http://schemas.microsoft.com/analysisservices/2010/engine/200' as ddl200
+							 ,'http://schemas.microsoft.com/analysisservices/2010/engine/200/200' as ddl200_200
+							 ,'http://schemas.microsoft.com/analysisservices/2011/engine/300' as ddl300
+							 ,'http://schemas.microsoft.com/analysisservices/2011/engine/300/300' as ddl300_300
+							 ,'http://schemas.microsoft.com/analysisservices/2012/engine/400' as ddl400
+							 ,'http://schemas.microsoft.com/analysisservices/2012/engine/400/400' as ddl400_400
+							 ,'http://schemas.microsoft.com/analysisservices/2013/engine/500' as ddl500
+							 ,'http://schemas.microsoft.com/analysisservices/2013/engine/500/500' as ddl500_500
+
+							)
+		select @PartitionXmla =
+		(
+		select PartitionID as ID 
+			 , PartitionName as Name
+			 , PartitionSourceType as "Source/@xsi:type"
+			 , DataSourceID as "Source/DataSourceID"
+			 , ProcessDataPartionQuery as "Source/QueryDefinition"
+			 , StorageMode as StorageMode
+			 , 'Regular' as ProcessingMode
+			 ,'-PT1S' as "ProactiveCaching/SilenceInterval"
+			 ,'-PT1S' as "ProactiveCaching/Latency"
+			 ,'-PT1S' as "ProactiveCaching/SilenceOverrideInterval"
+			 ,'ProactiveCachingInheritedBinding' as "ProactiveCaching/Source/@xsi:type"
+			 ,'InMemoryOnly' as "ddl300_300:DirectQueryUsage"
+			 ,@EstimateRow as EstimatedRows     --SUM(UpdateEstimatedRows+InsertEstimatedRows) 
+			 ,AggregationDesignID as AggregationDesignID
+		from Catalog.[SSASPartitionManager]
+		where DatabaseID =@DatabaseID 
+			and CubeID = @CubeID
+			and MeasureGroupID = @MeasureGroupID
+			and PartitionID = @PartitionID
+			and CreatedDateTime is null
+		for xml path ('Partition')
+		);
+
+		set @PartitionCommand= 
+		'<Alter AllowCreate="true" ObjectExpansion="ExpandFull" xmlns="http://schemas.microsoft.com/analysisservices/2003/engine">'
+		+@ParentObjectXmla
+		+'<ObjectDefinition>'
+		+ @PartitionXmla
+		+ '</ObjectDefinition></Alter>'
+END
+
+ELSE    --- i.e we have only Insertedrecord count alone in PartitionManagerStatus for respective Partition (UpdatedRecords is null)
+
+BEGIN
+
+UPDATE [Catalog].[SSASPartitionManager]
+SET ProcessAddPartionQuery=@ProcessAddPartionQuery,InsertEstimatedRows=@InsertedRows,UpdateEstimatedRows=@updatedRows
+WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName
+
+
+
+		;with xmlnamespaces('http://www.w3.org/2001/XMLSchema' as xsd 
+							 ,'http://www.w3.org/2001/XMLSchema-instance' as xsi
+							 ,'http://schemas.microsoft.com/analysisservices/2003/engine/2' as ddl2
+							 ,'http://schemas.microsoft.com/analysisservices/2003/engine/2/2' as ddl2_2
+							 ,'http://schemas.microsoft.com/analysisservices/2008/engine/100/100' as ddl100_100
+							 ,'http://schemas.microsoft.com/analysisservices/2010/engine/200' as ddl200
+							 ,'http://schemas.microsoft.com/analysisservices/2010/engine/200/200' as ddl200_200
+							 ,'http://schemas.microsoft.com/analysisservices/2011/engine/300' as ddl300
+							 ,'http://schemas.microsoft.com/analysisservices/2011/engine/300/300' as ddl300_300
+							 ,'http://schemas.microsoft.com/analysisservices/2012/engine/400' as ddl400
+							 ,'http://schemas.microsoft.com/analysisservices/2012/engine/400/400' as ddl400_400
+							 ,'http://schemas.microsoft.com/analysisservices/2013/engine/500' as ddl500
+							 ,'http://schemas.microsoft.com/analysisservices/2013/engine/500/500' as ddl500_500
+
+							)
+		select @PartitionXmla =
+		(
+		select PartitionID as ID 
+			 , PartitionName as Name
+			 , PartitionSourceType as "Source/@xsi:type"
+			 , DataSourceID as "Source/DataSourceID"
+			 , ProcessAddPartionQuery as "Source/QueryDefinition"
+			 , StorageMode as StorageMode
+			 , 'Regular' as ProcessingMode
+			 ,'-PT1S' as "ProactiveCaching/SilenceInterval"
+			 ,'-PT1S' as "ProactiveCaching/Latency"
+			 ,'-PT1S' as "ProactiveCaching/SilenceOverrideInterval"
+			 ,'ProactiveCachingInheritedBinding' as "ProactiveCaching/Source/@xsi:type"
+			 ,'InMemoryOnly' as "ddl300_300:DirectQueryUsage"
+			 ,InsertEstimatedRows as EstimatedRows
+			 ,AggregationDesignID as AggregationDesignID
+		from Catalog.[SSASPartitionManager]
+		where DatabaseID =@DatabaseID 
+			and CubeID = @CubeID
+			and MeasureGroupID = @MeasureGroupID
+			and PartitionID = @PartitionID
+			and CreatedDateTime is null
+		for xml path ('Partition')
+		);
+
+		set @PartitionCommand= 
+		'<Alter AllowCreate="true" ObjectExpansion="ExpandFull" xmlns="http://schemas.microsoft.com/analysisservices/2003/engine">'
+		+@ParentObjectXmla
+		+'<ObjectDefinition>'
+		+ @PartitionXmla
+		+ '</ObjectDefinition></Alter>'
+END
+
+INSERT INTO [Catalog].[Logs]
+               (T_CD, 
+                           L_TASK,
+                           L_EVENT,
+                           L_HOST_MACHINE,
+                           L_TASK_DURATION,
+                           L_SUBTASK_DURATION,
+                           L_Info,
+                           Cr_TS,
+                           Load_Ver_ID) 
+           VALUES (@TCD, 
+                           'usp_' +@TCD,
+                           'Information',
+                           @@Servername,
+                           DATEDIFF(second,@TaskDuration,GetDate()),
+                           0,
+                           @PartitionCommand--+' Last Completed Execution Max Date - '+CONVERT(varchar(50),@LastExecutionDate,121),
+                          ,GETDATE()
+                          ,@LoadVersionID)
+end 
+
+
+GO
+
+PRINT '>>> PROCEDURE [Catalog].[usp_getPartitionCommand] CREATED.'
+
+GO
+
+IF EXISTS( SELECT TOP 1 1  FROM [ERDB].SYS.objects WHERE name='usp_getProcessingCommand')
+BEGIN
+DROP PROCEDURE [Catalog].[usp_getProcessingCommand] 
+PRINT '>>> PROCEDURE [ERDB].[Catalog].[usp_getProcessingCommand] DROPPED.'
+END
+GO
+/****** Object:  StoredProcedure [Catalog].[usp_getProcessingCommand]    Script Date: 9/25/2019 9:07:45 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/**********************************************************************************************************************************
+** Name: [usp_getProcessingCommand]
+DECLARE @ExitCode varchar(max) 
+EXEC [Catalog].[usp_getProcessingCommand] 0,'DimMember_History_428c37d2-f2ab-46c7-8e29-fc1d0846e6e2','DimMember_History_2018_12',@ExitCode OUT
+SELECT @ExitCode
+**********************************************************************************************************************************/
+
+CREATE PROCEDURE [Catalog].[usp_getProcessingCommand] 
+@LoadVersionID nvarchar(30) =NULL
+,@MeasureGroupID as varchar(500)
+,@PartitionName as varchar(500)
+,@InsertedRows as bigint
+,@updatedRows as bigint
+,@ProcessingCommand as varchar(max) output
+as
+begin
+	DECLARE @TCD VARCHAR(MAX)='getProcessingCommand'
+DECLARE @TaskDuration DATETIME= GETDATE()
+	declare @ProcessXmla  as varchar(max);
+	declare @ProcessBatchXmla as xml;
+	
+--DECLARE @ProcessFlag as varchar(50)=(SELECT UpdatedRows FROM Catalog.PartitionManagerStatus WITH(NOLOCK) WHERE Load_Ver_ID=@LoadVersionID AND PartitionName=@PartitionName)
+DECLARE @DatabaseID as varchar(50) = (SELECT TOP 1 [DatabaseID] FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName)
+DECLARE  @CubeID as varchar(100)= (SELECT TOP 1 [CubeID] FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName)
+DECLARE  @PartitionID as varchar(500) = (SELECT TOP 1 [PartitionID] FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName);
+DECLARE  @EstimateRow as varchar(500) = (SELECT SUM(@updatedRows+@InsertedRows))--DECLARE  @EstimateRow as varchar(500) = (SELECT TOP 1 SUM(UpdateEstimatedRows+InsertEstimatedRows) as EstimateRow FROM [Catalog].[SSASPartitionManager] WITH (NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName)
+
+
+IF(@updatedRows!=0)   --- i.e we have updaterecord count in PartitionManagerStatus for respective Partition.
+                               ---if we have atleast one updatedrecord count then no need to consider insertcount, we need to Process Partition with ProcessData
+BEGIN
+
+IF EXISTS (SELECT TOP 1 1 FROM [Catalog].[SSASPartitionManager]
+		   WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName AND ProcessType!='ProcessData')
+BEGIN
+UPDATE [Catalog].[SSASPartitionManager]
+SET ProcessType='ProcessData',UpdateEstimatedRows=@EstimateRow,InsertEstimatedRows=NULL
+WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName
+END
+	
+	
+	;with XMLNAMESPACES('http://www.w3.org/2001/XMLSchema' as xsd
+						,'http://www.w3.org/2001/XMLSchema-instance' as xsi
+						)
+	select @ProcessXmla = 
+	(
+
+	select DatabaseID as  "Object/DatabaseID"
+		,CubeID as "Object/CubeID"
+		,MeasureGroupID as "Object/MeasureGroupID"
+		,PartitionID as "Object/PartitionID"
+		,ProcessType as "Type"
+		,'UseExisting' as "WriteBackTableCreation"
+	from [Catalog].[SSASPartitionManager]
+	where DatabaseID =@DatabaseID
+		AND CubeID = @CubeID
+		AND PartitionName=@PartitionName
+		AND RequiresProcessFlag=1
+	for xml path ('Process')
+	) ;
+
+	set @ProcessBatchXmla= Convert(xml,
+	'<Batch xmlns="http://schemas.microsoft.com/analysisservices/2003/engine">
+	  <Parallel>'
+	  +@ProcessXmla
+	  +  '</Parallel>
+	</Batch>'
+	,1)
+
+	set @ProcessingCommand = Convert(varchar(max),@ProcessBatchXmla,1)
+END
+
+ELSE    --- i.e we have only Insertedrecord count alone in PartitionManagerStatus for respective Partition (UpdatedRecords is null)
+        ---if we have only Insertedrecord count and updatedRecordcount as null then we need to Process Partition with ProcessAdd
+BEGIN
+
+IF EXISTS (SELECT TOP 1 1 FROM [Catalog].[SSASPartitionManager]
+WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName AND ProcessType!='ProcessAdd')
+BEGIN
+UPDATE [Catalog].[SSASPartitionManager]
+SET ProcessType='ProcessAdd',UpdateEstimatedRows=NULL,InsertEstimatedRows=@InsertedRows
+WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName
+END
+
+;with XMLNAMESPACES('http://www.w3.org/2001/XMLSchema' as xsd
+						,'http://www.w3.org/2001/XMLSchema-instance' as xsi
+						)
+	select @ProcessXmla = 
+	(
+
+	select DatabaseID as  "Object/DatabaseID"
+		,CubeID as "Object/CubeID"
+		,MeasureGroupID as "Object/MeasureGroupID"
+		,PartitionID as "Object/PartitionID"
+		,ProcessType as "Type"
+		,'UseExisting' as "WriteBackTableCreation"
+	from [Catalog].[SSASPartitionManager]
+	where DatabaseID =@DatabaseID
+		AND CubeID = @CubeID
+		AND PartitionName=@PartitionName
+		AND RequiresProcessFlag=1
+	for xml path ('Process')
+	) ;
+
+	set @ProcessBatchXmla= Convert(xml,
+	'<Batch xmlns="http://schemas.microsoft.com/analysisservices/2003/engine">
+	  <Parallel>'
+	  +@ProcessXmla
+	  +  '</Parallel>
+	</Batch>'
+	,1)
+
+	set @ProcessingCommand = Convert(varchar(max),@ProcessBatchXmla,1)
+END
+	
+INSERT INTO [Catalog].[Logs]
+               (T_CD, 
+                           L_TASK,
+                           L_EVENT,
+                           L_HOST_MACHINE,
+                           L_TASK_DURATION,
+                           L_SUBTASK_DURATION,
+                           L_Info,
+                           Cr_TS,
+                           Load_Ver_ID) 
+           VALUES (@TCD, 
+                           'usp_' +@TCD,
+                           'Information',
+                           @@Servername,
+                           DATEDIFF(second,@TaskDuration,GetDate()),
+                           0,
+                           @ProcessingCommand--+' Last Completed Execution Max Date - '+CONVERT(varchar(50),@LastExecutionDate,121),
+                          ,GETDATE()
+                          ,@LoadVersionID)
+
+end
+
+GO
+
+PRINT '>>> PROCEDURE [Catalog].[usp_getProcessingCommand]  CREATED.'
+
+GO
+
+IF EXISTS( SELECT TOP 1 1  FROM [ERDB].SYS.objects WHERE name='usp_UpdatePartitionStatus')
+BEGIN
+DROP PROCEDURE  [Catalog].[usp_UpdatePartitionStatus] 
+PRINT '>>> PROCEDURE [ERDB]. [Catalog].[usp_UpdatePartitionStatus] DROPPED.'
+END
+
+GO
+
+/**********************************************************************************************************************************
+** Name: [Catalog].[usp_UpdatePartitionStatus] 
+** Desc: Common Sp to update LoadversionId and package execution statuse for all RCR packages
+** Auth: Cognizant
+
+EXEC [Catalog].[usp_UpdatePartitionStatus]  'CheckPartition','DimMember_History_428c37d2-f2ab-46c7-8e29-fc1d0846e6e2','DimMember_History_2018_5','DimMember_History_2018_5','0'
+**********************************************************************************************************************************/
+CREATE PROCEDURE [Catalog].[usp_UpdatePartitionStatus] 
+@Status nvarchar(30) ,
+@MeasureGroupID nvarchar(300),
+@PartitionName nvarchar(300),
+@Packagename nvarchar(30),
+@LoadVersionID bigint 
+AS
+BEGIN 	
+
+IF(@Status='CheckPartition')
+
+BEGIN
+
+IF EXISTS(SELECT TOP 1 1 FROM [Catalog].[SSASPartitionManager] WITH(NOLOCK) WHERE [MeasureGroupID]=@MeasureGroupID AND [PartitionName]=@PartitionName)
+BEGIN
+SELECT '1' AS RESULT
+END
+ELSE
+BEGIN
+SELECT '0' AS RESULT
+END
+
+END
+
+ELSE IF(@Status='INPROGRESS')
+
+BEGIN
+
+UPDATE [Catalog].[PartitionManagerStatus]
+SET T_Begin_TS=GETDATE(),T_STATUS=@Status
+WHERE Load_Ver_ID=@LoadVersionID
+AND PartitionName=@PartitionName
+AND PackageName=@Packagename
+
+END
+
+ELSE IF(@Status='COMPLETED')
+
+BEGIN
+
+UPDATE [Catalog].[PartitionManagerStatus]
+SET T_End_TS = GETDATE(),T_STATUS=@Status
+WHERE Load_Ver_ID=@LoadVersionID
+AND PartitionName=@PartitionName
+AND PackageName=@Packagename
+
+
+UPDATE [Catalog].[SSASPartitionManager] 
+SET CreatedDateTime=ISNULL(CreatedDateTime,getdate())
+,[LastProcessedDateTime]=GETDATE()
+,Load_Ver_ID=@LoadVersionID
+WHERE MeasureGroupID =@MeasureGroupID
+AND PartitionID =@PartitionName
+
+END
+
+ELSE IF(@Status='ERRORED')
+
+BEGIN
+UPDATE [Catalog].[PartitionManagerStatus]
+SET T_End_TS = GETDATE(),T_STATUS=@Status
+WHERE Load_Ver_ID=@LoadVersionID
+AND PartitionName=@PartitionName
+AND PackageName=@Packagename
+			   
+END
+
+END
+
+
+GO
+
+PRINT '>>> PROCEDURE [ERDB].[Catalog].[usp_UpdatePartitionStatus] CREATED.'
+
+GO
